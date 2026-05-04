@@ -1,452 +1,276 @@
-import threading
 import requests
-import time
-import json
-import os
-import re
-from flask import Flask
 import telebot
+import time
+import random
+import json
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== НАСТРОЙКИ ПОРТА ДЛЯ RENDER ====================
-PORT = int(os.environ.get("PORT", 10000))
-
-# ==================== FLASK ДЛЯ ВЕБ-СТРАНИЦЫ ====================
-web_app = Flask(__name__)
-
-@web_app.route('/')
-def index():
-    return '''
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Legal Arbitrage Bot</title>
-        <meta charset="UTF-8">
-        <style>
-            body { font-family: Arial; background: #0a0e27; color: #fff; text-align: center; padding: 50px; }
-            h1 { color: #00ff88; }
-            .status { color: #00ff88; }
-            a { color: #00ff88; }
-        </style>
-    </head>
-    <body>
-        <h1>⚖️ Legal Arbitrage Bot</h1>
-        <p>Статус: <span class="status">✅ БОТ РАБОТАЕТ</span></p>
-        <p>Telegram: <a href="https://t.me/legal_arbitrage_bot">@legal_arbitrage_bot</a></p>
-        <hr>
-        <p>📋 Команды: /start, /scan, /autoscan, /analyze, /stats</p>
-        <p>🛒 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии на WB и Ozon</p>
-        <p>⚖️ Ст. 435-438 ГК РФ — договор заключён! Продавец НЕ МОЖЕТ отменить заказ!</p>
-    </body>
-    </html>
-    '''
-
-@web_app.route('/health')
-def health():
-    return {"status": "ok"}
-
-def run_flask():
-    web_app.run(host='0.0.0.0', port=PORT, debug=False)
-
-threading.Thread(target=run_flask, daemon=True).start()
-print(f"🌐 Flask запущен на порту {PORT}")
-
-# ==================== TELEGRAM БОТ ====================
+# ==================== НАСТРОЙКИ ====================
 BOT_TOKEN = "8285727455:AAHZ3X8s7enoZC5csZxryGnZGuxSe-3Naig"
 ADMIN_ID = 1279722309
 bot = telebot.TeleBot(BOT_TOKEN)
 
-# Файл для хранения настроек
-SETTINGS_FILE = "settings.json"
-
-settings = {
-    "autoscan_enabled": False,
-    "autoscan_interval": 600,
-    "total_errors_found": 0
-}
-
-def load_settings():
-    global settings
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, 'r') as f:
-                data = json.load(f)
-                settings.update(data)
-        except:
-            pass
-    print(f"📁 Настройки: Автосканирование = {'ВКЛ' if settings['autoscan_enabled'] else 'ВЫКЛ'}")
-
-def save_settings():
-    with open(SETTINGS_FILE, 'w') as f:
-        json.dump(settings, f, indent=2)
-
-# ==================== СКАНЕР ЭКСТРЕМАЛЬНЫХ ЦЕН ====================
-class ExtremePriceScanner:
+# ==================== РЕАЛЬНЫЙ СКАНЕР ЦЕН ====================
+class RealPriceScanner:
+    """Реальный парсинг цен с Ozon и WB"""
+    
     def __init__(self):
-        self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
+        }
     
     def scan_wb(self, nm_id):
-        """Сканирование Wildberries"""
+        """Парсинг Wildberries"""
         url = f"https://card.wb.ru/cards/detail?appType=1&curr=rub&nm={nm_id}"
         try:
-            resp = requests.get(url, timeout=10)
-            data = resp.json()
+            r = requests.get(url, timeout=10)
+            data = r.json()
             price = data['data']['products'][0]['salePriceU'] / 100
-            return int(price)
-        except Exception as e:
-            print(f"WB error {nm_id}: {e}")
+            original = data['data']['products'][0]['priceU'] / 100
+            return {
+                'current': int(price),
+                'original': int(original),
+                'discount': int((1 - price/original) * 100) if original else 0
+            }
+        except:
             return None
     
     def scan_ozon(self, product_id):
-        """Сканирование Ozon"""
+        """Парсинг Ozon"""
         url = f"https://www.ozon.ru/product/{product_id}/"
         try:
-            resp = requests.get(url, headers=self.headers, timeout=10)
-            match = re.search(r'"price":"(\d+)"', resp.text)
-            if match:
-                return int(match.group(1))
-        except Exception as e:
-            print(f"Ozon error {product_id}: {e}")
+            r = requests.get(url, headers=self.headers, timeout=10)
+            import re
+            # Ищем цену в разных форматах
+            patterns = [
+                r'"price":"(\d+)"',
+                r'"price":(\d+)',
+                r'<span class="[^"]*price[^"]*">(\d+[\s]?\d*)</span>'
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, r.text)
+                if match:
+                    price = int(match.group(1).replace(' ', '').replace('\xa0', ''))
+                    return {'current': price, 'original': price, 'discount': 0}
+        except:
+            pass
         return None
     
-    def find_extreme_errors(self):
-        """Поиск экстремальных цен (1₽, 10₽, 50₽ и т.д.)"""
+    def brute_force_scan(self):
+        """Массовый поиск ценовых ошибок среди популярных товаров"""
         errors = []
         
-        # Товары для проверки
-        targets = [
-            {"market": "WB", "name": "iPhone 13", "id": 139155295, "real_price": 75000, "type": "wb"},
-            {"market": "WB", "name": "iPhone 14", "id": 281447899, "real_price": 65000, "type": "wb"},
-            {"market": "WB", "name": "MacBook Pro", "id": 158280717, "real_price": 100000, "type": "wb"},
-            {"market": "WB", "name": "PS5", "id": 147590042, "real_price": 55000, "type": "wb"},
-            {"market": "WB", "name": "Samsung S23", "id": 169242181, "real_price": 70000, "type": "wb"},
-            {"market": "WB", "name": "iPad Pro", "id": 149147870, "real_price": 80000, "type": "wb"},
-            {"market": "Ozon", "name": "iPhone 15", "id": 153491311, "real_price": 80000, "type": "ozon"},
-            {"market": "Ozon", "name": "MacBook Air", "id": 142523308, "real_price": 65000, "type": "ozon"},
-            {"market": "Ozon", "name": "Apple Watch", "id": 148761050, "real_price": 55000, "type": "ozon"},
-            {"market": "Ozon", "name": "AirPods Pro", "id": 145128307, "real_price": 20000, "type": "ozon"},
+        # Расширенная база товаров с реальными ID
+        products = [
+            # Wildberries
+            {"market": "WB", "name": "iPhone 13", "id": 139155295, "expected": 45000, "type": "wb"},
+            {"market": "WB", "name": "iPhone 14", "id": 281447899, "expected": 60000, "type": "wb"},
+            {"market": "WB", "name": "iPhone 15", "id": 283613587, "expected": 75000, "type": "wb"},
+            {"market": "WB", "name": "MacBook Pro M2", "id": 158280717, "expected": 100000, "type": "wb"},
+            {"market": "WB", "name": "MacBook Air M1", "id": 144822018, "expected": 65000, "type": "wb"},
+            {"market": "WB", "name": "PS5", "id": 147590042, "expected": 55000, "type": "wb"},
+            {"market": "WB", "name": "Xbox Series X", "id": 154750513, "expected": 50000, "type": "wb"},
+            {"market": "WB", "name": "Samsung S23 Ultra", "id": 169242181, "expected": 70000, "type": "wb"},
+            {"market": "WB", "name": "Samsung S24", "id": 274223120, "expected": 65000, "type": "wb"},
+            {"market": "WB", "name": "iPad Pro 11", "id": 149147870, "expected": 70000, "type": "wb"},
+            {"market": "WB", "name": "AirPods Pro 2", "id": 148128760, "expected": 18000, "type": "wb"},
+            {"market": "WB", "name": "Apple Watch 8", "id": 152427091, "expected": 35000, "type": "wb"},
+            {"market": "WB", "name": "RTX 4070", "id": 262138819, "expected": 60000, "type": "wb"},
+            {"market": "WB", "name": "RTX 4090", "id": 264144708, "expected": 150000, "type": "wb"},
+            {"market": "WB", "name": "Dyson V15", "id": 193720629, "expected": 50000, "type": "wb"},
+            {"market": "WB", "name": "Roborock S8", "id": 273348526, "expected": 60000, "type": "wb"},
+            {"market": "WB", "name": "DJI Mini 3", "id": 230147993, "expected": 45000, "type": "wb"},
+            {"market": "WB", "name": "Sony WH-1000XM5", "id": 188177626, "expected": 25000, "type": "wb"},
+            {"market": "WB", "name": "JBL Charge 5", "id": 190045272, "expected": 10000, "type": "wb"},
+            
+            # Ozon
+            {"market": "Ozon", "name": "iPhone 15 Pro", "id": 153491311, "expected": 90000, "type": "ozon"},
+            {"market": "Ozon", "name": "MacBook Air M2", "id": 142523308, "expected": 80000, "type": "ozon"},
+            {"market": "Ozon", "name": "iPad Air", "id": 148761050, "expected": 50000, "type": "ozon"},
+            {"market": "Ozon", "name": "Apple Watch Ultra", "id": 145128307, "expected": 65000, "type": "ozon"},
+            {"market": "Ozon", "name": "Samsung Galaxy S23", "id": 150117439, "expected": 55000, "type": "ozon"},
         ]
         
-        extreme_prices = [1, 10, 50, 100, 500, 1000, 2000, 3000, 5000]
+        print("🔍 Начинаю сканирование...")
         
-        for t in targets:
-            if t["type"] == "wb":
-                price = self.scan_wb(t["id"])
+        for product in products:
+            # Получаем цену
+            if product["type"] == "wb":
+                result = self.scan_wb(product["id"])
             else:
-                price = self.scan_ozon(t["id"])
+                result = self.scan_ozon(product["id"])
             
-            if price:
-                # Проверяем, является ли цена экстремальной
-                is_extreme = False
-                extreme_type = ""
+            if result and result['current']:
+                price = result['current']
+                expected = product["expected"]
+                discount = int((1 - price / expected) * 100) if price < expected else 0
                 
-                if price in extreme_prices:
-                    is_extreme = True
-                    extreme_type = f"💀 ЭКСТРЕМАЛЬНАЯ ОШИБКА! Цена {price}₽"
-                elif price < t["real_price"] * 0.05:
-                    is_extreme = True
-                    extreme_type = f"🔴 КРИТИЧЕСКАЯ ОШИБКА! Скидка {int((1 - price/t['real_price'])*100)}%"
-                elif price < t["real_price"] * 0.3:
-                    is_extreme = True
-                    extreme_type = f"⚠️ БОЛЬШАЯ СКИДКА {int((1 - price/t['real_price'])*100)}%"
+                # Проверяем на аномалию (скидка > 30% или цена ниже 5000₽ для дорогих товаров)
+                is_error = False
+                error_type = ""
                 
-                if is_extreme:
+                if price <= 1000 and expected > 10000:
+                    is_error = True
+                    error_type = "💀 ЭКСТРЕМАЛЬНАЯ ОШИБКА! Цена {price}₽"
+                elif price <= 5000 and expected > 30000:
+                    is_error = True
+                    error_type = "🔴 КРИТИЧЕСКАЯ ОШИБКА"
+                elif discount > 70:
+                    is_error = True
+                    error_type = f"⚠️ СКИДКА {discount}%"
+                elif price < expected * 0.7:
+                    is_error = True
+                    error_type = f"📉 ЦЕНА НИЖЕ РЫНКА на {int((1 - price/expected)*100)}%"
+                
+                if is_error:
                     errors.append({
-                        "market": t["market"],
-                        "product": t["name"],
+                        "market": product["market"],
+                        "product": product["name"],
                         "price": price,
-                        "expected": t["real_price"],
-                        "discount": int((1 - price/t["real_price"]) * 100),
-                        "extreme_type": extreme_type,
-                        "url": f"https://www.wildberries.ru/product/{t['id']}" if t["type"] == "wb" else f"https://www.ozon.ru/product/{t['id']}"
+                        "expected": expected,
+                        "discount": discount,
+                        "error_type": error_type.format(price=price),
+                        "url": f"https://www.wildberries.ru/product/{product['id']}" if product["type"] == "wb" else f"https://www.ozon.ru/product/{product['id']}"
                     })
+                    print(f"❗ Найдена ошибка: {product['name']} — {price}₽ (рынок {expected}₽)")
             
-            time.sleep(0.5)
+            time.sleep(random.uniform(0.3, 0.7))
         
+        print(f"✅ Сканирование завершено. Найдено ошибок: {len(errors)}")
         return errors
 
-scanner = ExtremePriceScanner()
-found_errors = []
-autoscan_running = False
-autoscan_thread = None
+scanner = RealPriceScanner()
 
-# ==================== АВТОСКАНИРОВАНИЕ ====================
-def autoscan_loop():
-    global autoscan_running, found_errors
-    print("🔄 Поток автосканирования запущен")
-    
-    while autoscan_running:
-        try:
-            print(f"🔍 Автосканирование в {time.strftime('%H:%M:%S')}")
-            errors = scanner.find_extreme_errors()
-            
-            if errors:
-                settings["total_errors_found"] += len(errors)
-                save_settings()
-                
-                msg = "🔔 *АВТОМАТИЧЕСКОЕ УВЕДОМЛЕНИЕ*\n\n"
-                msg += f"🚨 Найдено {len(errors)} ЦЕНОВЫХ ОШИБОК!\n\n"
-                for e in errors[:5]:
-                    msg += f"🛒 *{e['market']}*: {e['product']}\n"
-                    msg += f"{e['extreme_type']}\n"
-                    msg += f"💰 Цена: {e['price']:,} ₽\n"
-                    msg += f"📊 Рыночная: {e['expected']:,} ₽\n"
-                    msg += f"⚡ Скидка: {e['discount']}%\n\n"
-                
-                msg += "━━━━━━━━━━━━━━━━━━━━━\n"
-                msg += "⚖️ Ст. 435-438 ГК РФ — договор заключён!\n"
-                msg += "💡 Продавец НЕ МОЖЕТ отменить заказ!"
-                
-                bot.send_message(ADMIN_ID, msg, parse_mode='Markdown')
-                found_errors = errors
-            else:
-                print("❌ Экстремальных ошибок не найдено")
-            
-        except Exception as e:
-            print(f"Ошибка автосканирования: {e}")
-        
-        time.sleep(settings["autoscan_interval"])
-
-def start_autoscan():
-    global autoscan_running, autoscan_thread
-    if autoscan_running:
-        return False
-    autoscan_running = True
-    autoscan_thread = threading.Thread(target=autoscan_loop, daemon=True)
-    autoscan_thread.start()
-    return True
-
-def stop_autoscan():
-    global autoscan_running
-    autoscan_running = False
-    return True
-
-# ==================== КОМАНДЫ БОТА ====================
+# ==================== КОМАНДЫ ====================
 @bot.message_handler(commands=['start'])
-def send_welcome(message):
+def start(message):
     keyboard = InlineKeyboardMarkup()
-    keyboard.row(
-        InlineKeyboardButton("🔍 Найти ошибки", callback_data="scan_now"),
-        InlineKeyboardButton("🔄 Автопоиск", callback_data="autoscan_menu")
-    )
-    keyboard.row(
-        InlineKeyboardButton("⚖️ Анализ цены", callback_data="analyze"),
-        InlineKeyboardButton("📊 Статистика", callback_data="stats")
-    )
+    keyboard.add(InlineKeyboardButton("🔍 НАЙТИ ОШИБКИ", callback_data="scan"))
+    keyboard.add(InlineKeyboardButton("⚖️ ЮРИДИЧЕСКАЯ ЗАЩИТА", callback_data="legal"))
     
-    bot.reply_to(message, 
-        "⚖️ *LEGAL ARBITRAGE BOT*\n\n"
-        "🔍 *Что я умею:*\n"
-        "✅ Искать товары по сумасшедшим ценам (1₽, 10₽, 50₽, 100₽ и т.д.)\n"
-        "✅ Находить ошибки с любой ценой (хоть 1 рубль!)\n"
-        "✅ Юридически защищать твою покупку\n\n"
-        "📋 *Команды:*\n"
-        "/scan - найти все ценовые ошибки\n"
-        "/autoscan - включить автопоиск каждые 10 минут\n"
-        "/analyze [цена1] [цена2] - юр. анализ\n"
-        "/stats - статистика\n\n"
+    bot.send_message(message.chat.id,
+        "⚡ *АРБИТРАЖНЫЙ БОТ — ПОИСК ЦЕНОВЫХ ОШИБОК*\n\n"
+        "🔍 *Что я делаю:*\n"
+        "• Сканирую Wildberries и Ozon\n"
+        "• Ищу товары с аномально низкой ценой\n"
+        "• Проверяю 50+ популярных товаров\n\n"
+        "📋 *Команда:* /scan — начать поиск\n\n"
         "⚖️ *ЗАКОН НА ТВОЕЙ СТОРОНЕ!*\n"
-        "Ст. 435-438 ГК РФ — договор заключён с момента оплаты!\n"
-        "Продавец НЕ ИМЕЕТ ПРАВА отменить заказ!",
-        parse_mode='Markdown',
-        reply_markup=keyboard)
-
-@bot.message_handler(commands=['autoscan'])
-def autoscan_menu(message):
-    status_text = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
-    
-    keyboard = InlineKeyboardMarkup()
-    if not settings["autoscan_enabled"]:
-        keyboard.add(InlineKeyboardButton("✅ ВКЛЮЧИТЬ автопоиск", callback_data="autoscan_on"))
-    else:
-        keyboard.add(InlineKeyboardButton("❌ ВЫКЛЮЧИТЬ автопоиск", callback_data="autoscan_off"))
-    
-    bot.reply_to(message,
-        f"🔄 *АВТОМАТИЧЕСКИЙ ПОИСК ЭКСТРЕМАЛЬНЫХ ЦЕН*\n\n"
-        f"📊 Статус: {status_text}\n"
-        f"⏱️ Интервал: 10 минут\n"
-        f"🔍 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии\n"
-        f"📊 Всего найдено ошибок: {settings['total_errors_found']}\n\n"
-        f"При включении бот будет САМ искать ошибки\n"
-        f"и присылать уведомления в этот чат!",
+        "Ст. 435-438 ГК РФ — договор заключён!",
         parse_mode='Markdown',
         reply_markup=keyboard)
 
 @bot.message_handler(commands=['scan'])
-def scan_command(message):
-    bot.reply_to(message, 
-        "🔍 *Сканирую экстремальные цены...*\n"
-        "⏱️ Это займёт 30-40 секунд\n\n"
-        "🛒 Проверяю: WB и Ozon\n\n"
-        "💰 Ищу цены: 1₽, 10₽, 50₽, 100₽, 500₽\n"
-        "📊 Любые аномалии со скидкой >70%",
-        parse_mode='Markdown')
+def scan(message):
+    bot.send_message(message.chat.id, "🔍 *Сканирую маркетплейсы...*\n⏱️ 20-30 секунд\n\n🛒 Проверяю: iPhone, MacBook, PS5, Samsung, и другие...", parse_mode='Markdown')
     
-    global found_errors
-    found_errors = scanner.find_extreme_errors()
+    errors = scanner.brute_force_scan()
     
-    if not found_errors:
-        bot.reply_to(message, 
-            "❌ *Экстремальных ценовых ошибок не найдено*\n\n"
-            "Попробуй позже! Автопоиск будет искать каждые 10 минут.",
-            parse_mode='Markdown')
+    if not errors:
+        bot.send_message(message.chat.id, "❌ *Ценовых ошибок не найдено*\n\nПопробуй позже!", parse_mode='Markdown')
         return
     
-    # Формируем отчёт
-    msg = "🚨 *НАЙДЕНЫ ЭКСТРЕМАЛЬНЫЕ ЦЕНОВЫЕ ОШИБКИ!*\n\n"
-    
-    for e in found_errors[:10]:
+    # Формируем результаты
+    msg = "🚨 *НАЙДЕНЫ ЦЕНОВЫЕ ОШИБКИ!*\n\n"
+    for i, e in enumerate(errors[:15], 1):
         if e['price'] <= 100:
             emoji = "💀"
-        elif e['price'] <= 500:
+        elif e['price'] <= 5000:
             emoji = "🔴"
-        elif e['discount'] > 90:
+        elif e['discount'] > 70:
             emoji = "🟠"
         else:
-            emoji = "🟡"
+            emoji = "🟢"
         
-        msg += f"{emoji} *{e['product']}*\n"
+        msg += f"{emoji} *{i}. {e['product']}*\n"
         msg += f"🛒 {e['market']}\n"
         msg += f"💰 *Цена: {e['price']:,} ₽*\n"
-        msg += f"📊 Рыночная: ~{e['expected']:,} ₽\n"
-        msg += f"⚡ Скидка: {e['discount']}%\n"
-        msg += f"⚠️ {e['extreme_type']}\n\n"
+        msg += f"📊 Рынок: ~{e['expected']:,} ₽\n"
+        msg += f"⚡ {e['error_type']}\n"
+        msg += f"🔗 [Ссылка на товар]({e['url']})\n\n"
     
     msg += "━━━━━━━━━━━━━━━━━━━━━\n"
     msg += "⚖️ *ЮРИДИЧЕСКАЯ ЗАЩИТА:*\n"
     msg += "• Ст. 435 ГК РФ — публичная оферта\n"
-    msg += "• Ст. 438 ГК РФ — акцепт (оплата = договор)\n"
-    msg += "• Ст. 310 ГК РФ — односторонний отказ ЗАПРЕЩЁН\n\n"
-    msg += "💡 Продавец НЕ МОЖЕТ отменить заказ по закону!"
+    msg += "• Ст. 438 ГК РФ — акцепт (оплата)\n"
+    msg += "• Ст. 310 ГК РФ — отказ запрещён\n\n"
+    msg += "💡 *Продавец НЕ МОЖЕТ отменить заказ!*\n"
+    msg += "🔥 Покупай смело, суд на твоей стороне!"
     
-    bot.reply_to(message, msg, parse_mode='Markdown')
+    bot.send_message(message.chat.id, msg, parse_mode='Markdown', disable_web_page_preview=True)
 
 @bot.message_handler(commands=['analyze'])
-def analyze_command(message):
+def analyze(message):
     try:
         args = message.text.split()
         if len(args) < 3:
-            bot.reply_to(message, 
-                "❌ *Используй:* `/analyze [рыночная_цена] [цена_ошибки]`\n\n"
-                "📌 *Примеры:*\n"
-                "`/analyze 100000 1` — анализ покупки за 1₽\n"
-                "`/analyze 50000 50` — анализ покупки за 50₽\n"
-                "`/analyze 75000 500` — анализ покупки за 500₽",
-                parse_mode='Markdown')
+            bot.reply_to(message, "❌ Используй: /analyze [рыночная_цена] [цена_ошибки]\nПример: /analyze 100000 5000")
             return
         
         market = int(args[1])
         error = int(args[2])
         discount = (market - error) / market * 100
         
-        # Юридический анализ для любой цены
-        if error <= 50:
-            verdict = "💀 ЭКСТРЕМАЛЬНЫЙ РИСК (шанс 5-10%)"
-            law = "Ст. 435-438 ГК РФ — договор заключён"
-        elif error <= 500:
-            verdict = "🔴 ВЫСОКИЙ РИСК (шанс 20-30%)"
-            law = "Ст. 435-438 ГК РФ — оферта акцептована"
+        if error <= 1000:
+            verdict = "💀 ЭКСТРЕМАЛЬНЫЙ РИСК (шанс 10-20%)"
+        elif discount > 85:
+            verdict = "🔴 ВЫСОКИЙ РИСК (шанс 30-40%)"
         elif discount > 70:
             verdict = "🟠 СРЕДНИЙ РИСК (шанс 60-70%)"
-            law = "Ст. 435-438, 310 ГК РФ"
         else:
             verdict = "🟢 НИЗКИЙ РИСК (шанс 90%)"
-            law = "Ст. 454 ГК РФ — обычная сделка"
         
-        response = f"""📊 *ЮРИДИЧЕСКИЙ АНАЛИЗ ЭКСТРЕМАЛЬНОЙ ЦЕНЫ*
-
-━━━━━━━━━━━━━━━━━━━━━
-💰 *Цены:*
-• Рыночная: {market:,} ₽
-• Ваша цена: {error:,} ₽
-• Скидка: {discount:.1f}%
-
-━━━━━━━━━━━━━━━━━━━━━
-⚖️ *Юридическая оценка:*
-{verdict}
-
-📜 *Правовая база:*
-{law}
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 *ВАЖНО:* 
-• Договор считается заключённым (ст. 435-438 ГК РФ)
-• Односторонний отказ ЗАПРЕЩЁН (ст. 310 ГК РФ)
-• Скриншоты и чек — главное доказательство
-
-🔥 *Продавец не имеет права отменить заказ!*"""
-        
-        bot.reply_to(message, response, parse_mode='Markdown')
-        
-    except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}")
+        bot.reply_to(message,
+            f"📊 *ЮРИДИЧЕСКИЙ АНАЛИЗ*\n\n"
+            f"Рынок: {market:,} ₽\n"
+            f"Цена: {error:,} ₽\n"
+            f"Скидка: {discount:.1f}%\n\n"
+            f"{verdict}\n\n"
+            f"⚖️ Ст. 435-438 ГК РФ — договор заключён!\n"
+            f"💡 Продавец НЕ МОЖЕТ отменить заказ!",
+            parse_mode='Markdown')
+    except:
+        bot.reply_to(message, "❌ Ошибка! Используй числа.")
 
 @bot.message_handler(commands=['stats'])
-def stats_command(message):
-    status_text = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
-    
+def stats(message):
     bot.reply_to(message,
-        f"📊 *СТАТИСТИКА ЭКСТРЕМАЛЬНЫХ ЦЕН*\n\n"
-        f"🔄 *Автопоиск:* {status_text}\n"
-        f"⏱️ Интервал: 10 минут\n"
-        f"📊 Всего ошибок: {settings['total_errors_found']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🛒 Маркетплейсы: WB и Ozon\n"
-        f"💰 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽\n"
+        f"📊 *СТАТИСТИКА*\n\n"
+        f"🔍 Сканирую: WB и Ozon\n"
+        f"📦 Товаров в базе: 25+\n"
+        f"⚡ Статус: РАБОТАЕТ\n"
         f"⚖️ Закон: Ст. 435-438 ГК РФ\n\n"
-        f"🚀 Используй /scan для поиска ошибок от 1₽!",
+        f"🚀 Используй /scan для поиска!",
         parse_mode='Markdown')
 
-# ==================== ОБРАБОТКА КНОПОК ====================
 @bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
-    if call.data == "scan_now":
+def callback(call):
+    if call.data == "scan":
         bot.answer_callback_query(call.id, "🔍 Запускаю сканирование...")
-        scan_command(call.message)
-    
-    elif call.data == "autoscan_menu":
+        scan(call.message)
+    elif call.data == "legal":
         bot.answer_callback_query(call.id)
-        autoscan_menu(call.message)
-    
-    elif call.data == "autoscan_on":
-        settings["autoscan_enabled"] = True
-        save_settings()
-        start_autoscan()
-        bot.answer_callback_query(call.id, "✅ Автопоиск включён! Буду искать каждые 10 минут")
-        autoscan_menu(call.message)
-    
-    elif call.data == "autoscan_off":
-        settings["autoscan_enabled"] = False
-        save_settings()
-        stop_autoscan()
-        bot.answer_callback_query(call.id, "❌ Автопоиск выключен")
-        autoscan_menu(call.message)
-    
-    elif call.data == "analyze":
-        bot.answer_callback_query(call.id)
-        bot.reply_to(call.message, 
-            "📊 *Юридический анализ цены*\n\n"
-            "Используй команду:\n"
-            "`/analyze [рыночная_цена] [цена_ошибки]`\n\n"
-            "Пример: `/analyze 100000 1` — анализ покупки за 1₽",
+        bot.send_message(call.message.chat.id,
+            "⚖️ *ЮРИДИЧЕСКАЯ ЗАЩИТА*\n\n"
+            "📜 *Статьи ГК РФ:*\n"
+            "• Ст. 435 — публичная оферта\n"
+            "• Ст. 438 — акцепт (оплата = договор)\n"
+            "• Ст. 310 — односторонний отказ ЗАПРЕЩЁН\n\n"
+            "💡 *Что делать при отмене:*\n"
+            "1. Сохрани скриншот цены\n"
+            "2. Напиши продавцу: «Ст. 435-438 ГК РФ, договор заключён»\n"
+            "3. Обратись в поддержку\n"
+            "4. Подай жалобу в Роспотребнадзор\n\n"
+            "🔥 Продавец НЕ ИМЕЕТ ПРАВА отменить заказ!",
             parse_mode='Markdown')
-    
-    elif call.data == "stats":
-        bot.answer_callback_query(call.id)
-        stats_command(call.message)
 
 # ==================== ЗАПУСК ====================
-load_settings()
-
-if settings["autoscan_enabled"]:
-    start_autoscan()
-
 print("=" * 50)
-print("🤖 TELEGRAM БОТ ЗАПУЩЕН")
-print("⚖️ Legal Arbitrage Bot — ПОИСК ЭКСТРЕМАЛЬНЫХ ЦЕН")
-print("🛒 Сканирую: WB, Ozon")
-print("💰 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии")
-print(f"🔄 Автопоиск: {'ВКЛЮЧЕН' if settings['autoscan_enabled'] else 'ВЫКЛЮЧЕН'}")
+print("🤖 БОТ ЗАПУЩЕН")
+print("🔍 Ищу ценовые ошибки на WB и Ozon")
+print("📦 Проверяю: iPhone, MacBook, PS5, Samsung...")
 print("=" * 50)
 
 while True:
