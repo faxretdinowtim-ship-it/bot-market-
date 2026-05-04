@@ -59,12 +59,11 @@ SETTINGS_FILE = "settings.json"
 # Настройки по умолчанию
 settings = {
     "autoscan_enabled": False,
-    "autoscan_interval": 600,  # 10 минут = 600 секунд
+    "autoscan_interval": 600,
     "last_scan": None,
     "total_errors_found": 0
 }
 
-# Загружаем настройки
 def load_settings():
     global settings
     if os.path.exists(SETTINGS_FILE):
@@ -73,7 +72,7 @@ def load_settings():
                 settings.update(json.load(f))
         except:
             pass
-    print(f"📁 Настройки загружены: Автосканирование = {'ВКЛ' if settings['autoscan_enabled'] else 'ВЫКЛ'}")
+    print(f"📁 Настройки: Автосканирование = {'ВКЛ' if settings['autoscan_enabled'] else 'ВЫКЛ'}")
 
 def save_settings():
     with open(SETTINGS_FILE, 'w') as f:
@@ -97,16 +96,9 @@ class PriceScanner:
         url = f"https://www.ozon.ru/product/{product_id}/"
         try:
             resp = requests.get(url, headers=self.headers, timeout=10)
-            price_patterns = [
-                r'"price":"(\d+)"',
-                r'"price":(\d+)',
-                r'<span class="[^"]*price[^"]*">(\d+[\s]?\d*)</span>'
-            ]
-            for pattern in price_patterns:
-                match = re.search(pattern, resp.text)
-                if match:
-                    price_str = match.group(1).replace(' ', '').replace('\xa0', '')
-                    return int(price_str)
+            match = re.search(r'"price":"(\d+)"', resp.text)
+            if match:
+                return int(match.group(1))
         except:
             pass
         return None
@@ -118,7 +110,6 @@ class PriceScanner:
             resp = requests.get(url, headers=self.headers, timeout=10)
             soup = BeautifulSoup(resp.text, 'html.parser')
             items = soup.find_all('div', {'data-marker': 'item'})
-            
             for item in items[:5]:
                 price_tag = item.find('span', {'class': 'price'})
                 if price_tag:
@@ -129,49 +120,22 @@ class PriceScanner:
                             title_tag = item.find('h3')
                             title = title_tag.get_text(strip=True) if title_tag else query
                             results.append({
+                                'market': 'Avito',
                                 'product': title[:30],
                                 'price': price,
                                 'expected': max_price,
                                 'discount': int((1 - price/max_price) * 100),
-                                'market': 'Avito'
                             })
         except Exception as e:
             print(f"Avito error: {e}")
         return results
     
-    def scan_yandex(self, query):
-        url = f"https://market.yandex.ru/search?text={query}"
-        try:
-            resp = requests.get(url, headers=self.headers, timeout=10)
-            price_pattern = r'<span class="[^"]*price[^"]*">(\d+[\s]?\d*)'
-            matches = re.findall(price_pattern, resp.text)
-            if matches:
-                price_str = matches[0].replace(' ', '').replace('\xa0', '')
-                return int(price_str)
-        except:
-            pass
-        return None
-    
-    def scan_dns(self, product_id):
-        url = f"https://www.dns-shop.ru/product/{product_id}/"
-        try:
-            resp = requests.get(url, headers=self.headers, timeout=10)
-            match = re.search(r'"price":(\d+)', resp.text)
-            if match:
-                return int(match.group(1))
-        except:
-            pass
-        return None
-    
     def find_price_errors(self):
         errors = []
-        
-        # 1. Wildberries
+        # WB
         wb_targets = [
             {"name": "iPhone 13", "id": 139155295, "expected": 45000},
             {"name": "PS5", "id": 147590042, "expected": 50000},
-            {"name": "MacBook Air", "id": 158280717, "expected": 70000},
-            {"name": "Samsung S23", "id": 169242181, "expected": 50000},
         ]
         for t in wb_targets:
             price = self.scan_wb(t["id"])
@@ -184,12 +148,9 @@ class PriceScanner:
                     "discount": int((1 - price/t["expected"]) * 100),
                 })
             time.sleep(0.3)
-        
-        # 2. Ozon
+        # Ozon
         ozon_targets = [
             {"name": "iPhone 14", "id": 142523308, "expected": 60000},
-            {"name": "AirPods Pro", "id": 145128307, "expected": 15000},
-            {"name": "iPad Pro", "id": 148761050, "expected": 70000},
         ]
         for t in ozon_targets:
             price = self.scan_ozon(t["id"])
@@ -202,62 +163,35 @@ class PriceScanner:
                     "discount": int((1 - price/t["expected"]) * 100),
                 })
             time.sleep(0.5)
-        
-        # 3. Avito
-        avito_results = self.scan_avito("iphone", 15000)
-        errors.extend(avito_results)
-        
+        # Avito
+        errors.extend(self.scan_avito("iphone", 15000))
         return errors
 
 scanner = PriceScanner()
 found_errors = []
-autoscan_thread = None
 autoscan_running = False
+autoscan_thread = None
 
-# ==================== АВТОМАТИЧЕСКОЕ СКАНИРОВАНИЕ ====================
 def autoscan_loop():
     global autoscan_running, found_errors
-    print("🔄 Автосканирование запущено (интервал: 10 минут)")
-    
     while autoscan_running:
         try:
             print(f"🔍 Автосканирование в {time.strftime('%H:%M:%S')}")
             errors = scanner.find_price_errors()
-            
             if errors:
                 settings["total_errors_found"] += len(errors)
                 save_settings()
-                
-                # Отправляем уведомление админу
                 msg = "🔔 *АВТОМАТИЧЕСКОЕ УВЕДОМЛЕНИЕ*\n\n"
-                msg += f"🚨 Найдено {len(errors)} ценовых ошибок!\n\n"
+                msg += f"🚨 Найдено {len(errors)} ошибок!\n\n"
                 for e in errors[:3]:
-                    msg += f"🛒 {e['market']}: {e['product']}\n"
-                    msg += f"💰 {e['price']:,} ₽ (скидка {e['discount']}%)\n\n"
-                msg += f"📊 Всего найдено: {settings['total_errors_found']}\n"
-                msg += f"🕐 Время: {time.strftime('%H:%M:%S')}\n\n"
-                msg += "Используй /scan для полного отчета"
-                
+                    msg += f"🛒 {e['market']}: {e['product']}\n💰 {e['price']:,} ₽\n\n"
                 bot.send_message(1279722309, msg, parse_mode='Markdown')
-                
-                # Сохраняем ошибки
                 found_errors = errors
             else:
                 print("❌ Ошибок не найдено")
-            
-            settings["last_scan"] = time.time()
-            save_settings()
-            
         except Exception as e:
-            print(f"Ошибка автосканирования: {e}")
-        
-        # Ждём 10 минут
-        for _ in range(settings["autoscan_interval"]):
-            if not autoscan_running:
-                break
-            time.sleep(1)
-    
-    print("⏹️ Автосканирование остановлено")
+            print(f"Ошибка: {e}")
+        time.sleep(600)  # 10 минут
 
 def start_autoscan():
     global autoscan_running, autoscan_thread
@@ -277,211 +211,59 @@ def stop_autoscan():
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     keyboard = InlineKeyboardMarkup()
-    keyboard.row(
-        InlineKeyboardButton("🔍 Найти ошибки", callback_data="scan_now"),
-        InlineKeyboardButton("🔄 Автопоиск", callback_data="autoscan_menu")
-    )
-    keyboard.row(
-        InlineKeyboardButton("⚖️ Анализ", callback_data="analyze"),
-        InlineKeyboardButton("📊 Статистика", callback_data="stats")
-    )
-    
-    bot.reply_to(message, 
-        "⚖️ *LEGAL ARBITRAGE BOT*\n\n"
-        "🔍 *Команды:*\n"
-        "/scan - найти ценовые ошибки на ВСЕХ маркетплейсах\n"
-        "/autoscan - настройка автоматического поиска (каждые 10 минут)\n"
-        "/analyze - юридический анализ сделки\n"
-        "/stats - статистика\n\n"
-        "🛒 *Сканирую:* WB | Ozon | Avito | Яндекс.Маркет | DNS\n\n"
-        "⚖️ *Ст. 435-438 ГК РФ* — договор заключён!\n"
-        "Продавец *НЕ ИМЕЕТ ПРАВА* отменить заказ!",
-        parse_mode='Markdown',
-        reply_markup=keyboard)
+    keyboard.add(InlineKeyboardButton("🔍 Найти ошибки", callback_data="scan_now"))
+    keyboard.add(InlineKeyboardButton("🔄 Автопоиск", callback_data="autoscan_menu"))
+    bot.reply_to(message, "⚖️ Legal Arbitrage Bot\n\nВыбери действие:", reply_markup=keyboard)
 
 @bot.message_handler(commands=['autoscan'])
 def autoscan_menu(message):
-    status_text = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
-    
+    status = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
     keyboard = InlineKeyboardMarkup()
     if not settings["autoscan_enabled"]:
-        keyboard.add(InlineKeyboardButton("✅ ВКЛЮЧИТЬ автопоиск", callback_data="autoscan_on"))
+        keyboard.add(InlineKeyboardButton("✅ ВКЛЮЧИТЬ", callback_data="autoscan_on"))
     else:
-        keyboard.add(InlineKeyboardButton("❌ ВЫКЛЮЧИТЬ автопоиск", callback_data="autoscan_off"))
-    
-    keyboard.add(InlineKeyboardButton("⏱️ Интервал: 10 минут", callback_data="noop"))
-    
-    bot.reply_to(message,
-        f"🔄 *АВТОМАТИЧЕСКИЙ ПОИСК*\n\n"
-        f"Статус: {status_text}\n"
-        f"⏱️ Интервал: 10 минут\n"
-        f"📊 Найдено ошибок всего: {settings['total_errors_found']}\n\n"
-        f"При включении бот будет сам искать ценовые ошибки\n"
-        f"каждые 10 минут и присылать уведомления!",
-        parse_mode='Markdown',
-        reply_markup=keyboard)
+        keyboard.add(InlineKeyboardButton("❌ ВЫКЛЮЧИТЬ", callback_data="autoscan_off"))
+    bot.reply_to(message, f"🔄 Автопоиск: {status}\n\nИнтервал: 10 минут", reply_markup=keyboard)
 
 @bot.message_handler(commands=['scan'])
 def scan_command(message):
-    bot.reply_to(message, "🔍 *Сканирую ВСЕ маркетплейсы...*\n"
-                          "⏱️ Это займёт 30-40 секунд\n\n"
-                          "🛒 Проверяю: WB, Ozon, Avito, Яндекс.Маркет, DNS",
-                          parse_mode='Markdown')
-    
+    bot.reply_to(message, "🔍 Сканирую...")
     global found_errors
     found_errors = scanner.find_price_errors()
-    
     if not found_errors:
-        bot.reply_to(message, "❌ *Ценовых ошибок не найдено*\n\nПопробуй позже!", parse_mode='Markdown')
+        bot.reply_to(message, "❌ Ошибок не найдено")
         return
-    
-    msg = "🚨 *НАЙДЕНЫ ЦЕНОВЫЕ ОШИБКИ!*\n\n"
-    
+    msg = "🚨 НАЙДЕНЫ ОШИБКИ!\n\n"
     for e in found_errors:
-        market_emoji = {
-            "WB": "🟣", "Ozon": "🔵", "Avito": "🟠", 
-            "Яндекс.Маркет": "🟡", "DNS": "🔴"
-        }.get(e['market'], "🛒")
-        
-        if e['discount'] > 85:
-            discount_emoji = "💀"
-        elif e['discount'] > 70:
-            discount_emoji = "⚠️"
-        else:
-            discount_emoji = "✅"
-        
-        msg += f"{market_emoji} *{e['market']}*\n"
-        msg += f"📦 {e['product']}\n"
-        msg += f"💰 Цена: {e['price']:,} ₽\n"
-        msg += f"📊 Рынок: ~{e['expected']:,} ₽\n"
-        msg += f"{discount_emoji} Скидка: {e['discount']}%\n\n"
-    
-    msg += "━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += "⚖️ *Продавец НЕ МОЖЕТ отменить заказ!*\n"
-    msg += "📍 Ст. 435-438, 310 ГК РФ"
-    
-    bot.reply_to(message, msg, parse_mode='Markdown')
+        msg += f"🛒 {e['market']}: {e['product']}\n💰 {e['price']:,} ₽\n\n"
+    bot.reply_to(message, msg)
 
-@bot.message_handler(commands=['analyze'])
-def analyze_command(message):
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            bot.reply_to(message, 
-                "❌ *Используй:* `/analyze [рынок] [ошибка]`\n"
-                "📌 *Пример:* `/analyze 100000 5000`\n\n"
-                "💡 *Что означают цифры:*\n"
-                "100000 — рыночная цена\n"
-                "5000 — цена по ошибке\n"
-                "→ Скидка 95%",
-                parse_mode='Markdown')
-            return
-        
-        market = int(args[1])
-        error = int(args[2])
-        discount = (market - error) / market * 100
-        
-        if discount > 95:
-            verdict = "💀 *КРИТИЧЕСКИЙ РИСК* (шанс <10%)"
-            law = "Ст. 1102 ГК РФ — неосновательное обогащение"
-        elif discount > 85:
-            verdict = "🔴 *ВЫСОКИЙ РИСК* (шанс 30%)"
-            law = "Ст. 435-438 ГК РФ — договор заключён"
-        elif discount > 70:
-            verdict = "🟠 *СРЕДНИЙ РИСК* (шанс 65%)"
-            law = "Ст. 435-438, 310 ГК РФ — отказ запрещён"
-        else:
-            verdict = "🟢 *НИЗКИЙ РИСК* (шанс 90%)"
-            law = "Ст. 454 ГК РФ — обычная сделка"
-        
-        response = f"📊 *ЮРИДИЧЕСКИЙ АНАЛИЗ*\n\n"
-        response += f"💰 Рыночная цена: {market:,} ₽\n"
-        response += f"🎯 Цена ошибки: {error:,} ₽\n"
-        response += f"⚡ Скидка: {discount:.1f}%\n\n"
-        response += f"{verdict}\n\n"
-        response += f"⚖️ *Правовая база:*\n{law}\n\n"
-        response += f"📍 Продавец *НЕ ИМЕЕТ ПРАВА* отменить заказ!"
-        
-        bot.reply_to(message, response, parse_mode='Markdown')
-    except:
-        bot.reply_to(message, "❌ *Ошибка!* Используй числа.\nПример: `/analyze 100000 5000`", parse_mode='Markdown')
-
-@bot.message_handler(commands=['stats'])
-def stats_command(message):
-    markets_count = {}
-    for e in found_errors:
-        markets_count[e['market']] = markets_count.get(e['market'], 0) + 1
-    
-    stats = ""
-    for market, count in markets_count.items():
-        stats += f"🛒 {market}: {count} ошибок\n"
-    
-    if not stats:
-        stats = "Нет данных. Используй /scan"
-    
-    status_text = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
-    
-    bot.reply_to(message,
-        f"📊 *СТАТИСТИКА*\n\n"
-        f"🔍 *Последнее сканирование:*\n{stats}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 *Автопоиск:* {status_text}\n"
-        f"⏱️ Интервал: 10 минут\n"
-        f"📊 Всего ошибок: {settings['total_errors_found']}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🛒 Маркетплейсы: WB, Ozon, Avito, Яндекс, DNS\n"
-        f"⚖️ Закон: Ст. 435-438 ГК РФ\n\n"
-        f"🚀 Используй /autoscan для настройки!",
-        parse_mode='Markdown')
-
-# ==================== ОБРАБОТКА КНОПОК ====================
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if call.data == "scan_now":
-        bot.answer_callback_query(call.id, "🔍 Запускаю сканирование...")
         scan_command(call.message)
-    
     elif call.data == "autoscan_menu":
-        bot.answer_callback_query(call.id)
         autoscan_menu(call.message)
-    
     elif call.data == "autoscan_on":
         settings["autoscan_enabled"] = True
         save_settings()
         start_autoscan()
-        bot.answer_callback_query(call.id, "✅ Автопоиск включён! Буду сканировать каждые 10 минут")
+        bot.answer_callback_query(call.id, "✅ Автопоиск включён!")
         autoscan_menu(call.message)
-    
     elif call.data == "autoscan_off":
         settings["autoscan_enabled"] = False
         save_settings()
         stop_autoscan()
         bot.answer_callback_query(call.id, "❌ Автопоиск выключен")
         autoscan_menu(call.message)
-    
-    elif call.data == "analyze":
-        bot.answer_callback_query(call.id)
-        analyze_command(call.message)
-    
-    elif call.data == "stats":
-        bot.answer_callback_query(call.id)
-        stats_command(call.message)
-    
-    elif call.data == "noop":
-        bot.answer_callback_query(call.id)
 
 # ==================== ЗАПУСК ====================
 load_settings()
-
-# Если автопоиск был включён, запускаем его
 if settings["autoscan_enabled"]:
     start_autoscan()
 
-print("🤖 Telegram бот запущен!")
-print("⚖️ Legal Arbitrage Bot готов к работе")
-print("🛒 Сканирую: WB, Ozon, Avito, Яндекс.Маркет, DNS")
-print(f"🔄 Автопоиск: {'ВКЛЮЧЕН' if settings['autoscan_enabled'] else 'ВЫКЛЮЧЕН'}")
-print(f"🌐 Веб-интерфейс: https://bot-market-01iu.onrender.com")
+print("🤖 Бот запущен!")
+print(f"🔄 Автопоиск: {'ВКЛ' if settings['autoscan_enabled'] else 'ВЫКЛ'}")
 
 while True:
     try:
