@@ -8,7 +8,10 @@ from flask import Flask
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ==================== FLASK ДЛЯ RENDER ====================
+# ==================== НАСТРОЙКИ ПОРТА ДЛЯ RENDER ====================
+PORT = int(os.environ.get("PORT", 10000))
+
+# ==================== FLASK ДЛЯ ВЕБ-СТРАНИЦЫ ====================
 web_app = Flask(__name__)
 
 @web_app.route('/')
@@ -32,8 +35,8 @@ def index():
         <p>Telegram: <a href="https://t.me/legal_arbitrage_bot">@legal_arbitrage_bot</a></p>
         <hr>
         <p>📋 Команды: /start, /scan, /autoscan, /analyze, /stats</p>
-        <p>🛒 Сканирую: WB | Ozon | Аномалии (1₽, 50₽, 100₽...)</p>
-        <p>⚖️ Ст. 435-438 ГК РФ — договор заключён!</p>
+        <p>🛒 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии на WB и Ozon</p>
+        <p>⚖️ Ст. 435-438 ГК РФ — договор заключён! Продавец НЕ МОЖЕТ отменить заказ!</p>
     </body>
     </html>
     '''
@@ -43,13 +46,14 @@ def health():
     return {"status": "ok"}
 
 def run_flask():
-    web_app.run(host='0.0.0.0', port=10000, debug=False)
+    web_app.run(host='0.0.0.0', port=PORT, debug=False)
 
 threading.Thread(target=run_flask, daemon=True).start()
-print("🌐 Flask запущен на порту 10000")
+print(f"🌐 Flask запущен на порту {PORT}")
 
 # ==================== TELEGRAM БОТ ====================
 BOT_TOKEN = "8285727455:AAHZ3X8s7enoZC5csZxryGnZGuxSe-3Naig"
+ADMIN_ID = 1279722309
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Файл для хранения настроек
@@ -58,7 +62,6 @@ SETTINGS_FILE = "settings.json"
 settings = {
     "autoscan_enabled": False,
     "autoscan_interval": 600,
-    "last_scan": None,
     "total_errors_found": 0
 }
 
@@ -79,8 +82,6 @@ def save_settings():
 
 # ==================== СКАНЕР ЭКСТРЕМАЛЬНЫХ ЦЕН ====================
 class ExtremePriceScanner:
-    """Поиск товаров с аномально низкой ценой (1р, 50р, 100р и т.д.)"""
-    
     def __init__(self):
         self.headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     
@@ -92,49 +93,41 @@ class ExtremePriceScanner:
             data = resp.json()
             price = data['data']['products'][0]['salePriceU'] / 100
             return int(price)
-        except:
+        except Exception as e:
+            print(f"WB error {nm_id}: {e}")
             return None
     
     def scan_ozon(self, product_id):
         """Сканирование Ozon"""
-        url = f"https://www.ozon.ru/api/composer-api.bx/page/json/v2?url=/product/{product_id}/"
-        headers = {'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json'}
+        url = f"https://www.ozon.ru/product/{product_id}/"
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = requests.get(url, headers=self.headers, timeout=10)
             match = re.search(r'"price":"(\d+)"', resp.text)
             if match:
                 return int(match.group(1))
-        except:
-            pass
+        except Exception as e:
+            print(f"Ozon error {product_id}: {e}")
         return None
     
     def find_extreme_errors(self):
-        """
-        Поиск экстремальных цен:
-        - Цена меньше 1000₽ для дорогих товаров
-        - Цена 1₽, 10₽, 50₽, 100₽, 500₽
-        """
+        """Поиск экстремальных цен (1₽, 10₽, 50₽ и т.д.)"""
         errors = []
         
-        # Товары для проверки + ожидаемая реальная цена
+        # Товары для проверки
         targets = [
-            # дорогие товары (iPhone, MacBook, PS5)
-            {"market": "WB", "name": "iPhone 13 Pro", "id": 139155295, "real_price": 75000, "type": "wb"},
+            {"market": "WB", "name": "iPhone 13", "id": 139155295, "real_price": 75000, "type": "wb"},
             {"market": "WB", "name": "iPhone 14", "id": 281447899, "real_price": 65000, "type": "wb"},
-            {"market": "WB", "name": "MacBook Pro M2", "id": 158280717, "real_price": 100000, "type": "wb"},
+            {"market": "WB", "name": "MacBook Pro", "id": 158280717, "real_price": 100000, "type": "wb"},
             {"market": "WB", "name": "PS5", "id": 147590042, "real_price": 55000, "type": "wb"},
-            {"market": "WB", "name": "Samsung S23 Ultra", "id": 169242181, "real_price": 70000, "type": "wb"},
+            {"market": "WB", "name": "Samsung S23", "id": 169242181, "real_price": 70000, "type": "wb"},
             {"market": "WB", "name": "iPad Pro", "id": 149147870, "real_price": 80000, "type": "wb"},
             {"market": "Ozon", "name": "iPhone 15", "id": 153491311, "real_price": 80000, "type": "ozon"},
-            {"market": "Ozon", "name": "MacBook Air M1", "id": 142523308, "real_price": 65000, "type": "ozon"},
-            {"market": "Ozon", "name": "Apple Watch Ultra", "id": 148761050, "real_price": 55000, "type": "ozon"},
-            {"market": "Ozon", "name": "AirPods Pro 2", "id": 145128307, "real_price": 20000, "type": "ozon"},
-            {"market": "Ozon", "name": "RTX 4090", "id": 153491311, "real_price": 150000, "type": "ozon"},
-            {"market": "WB", "name": "RTX 4080", "id": 158280717, "real_price": 100000, "type": "wb"},
+            {"market": "Ozon", "name": "MacBook Air", "id": 142523308, "real_price": 65000, "type": "ozon"},
+            {"market": "Ozon", "name": "Apple Watch", "id": 148761050, "real_price": 55000, "type": "ozon"},
+            {"market": "Ozon", "name": "AirPods Pro", "id": 145128307, "real_price": 20000, "type": "ozon"},
         ]
         
-        # Экстремальные ценовые пороги для поиска ошибок
-        extreme_thresholds = [1, 10, 50, 100, 500, 1000, 2000, 3000, 5000]
+        extreme_prices = [1, 10, 50, 100, 500, 1000, 2000, 3000, 5000]
         
         for t in targets:
             if t["type"] == "wb":
@@ -147,15 +140,15 @@ class ExtremePriceScanner:
                 is_extreme = False
                 extreme_type = ""
                 
-                if price in extreme_thresholds:
+                if price in extreme_prices:
                     is_extreme = True
-                    extreme_type = f"🔴 ЭКСТРЕМАЛЬНАЯ ОШИБКА! Цена {price}₽ при рыночной {t['real_price']:,}₽"
-                elif price < t["real_price"] * 0.05:  # Меньше 5% от рыночной
+                    extreme_type = f"💀 ЭКСТРЕМАЛЬНАЯ ОШИБКА! Цена {price}₽"
+                elif price < t["real_price"] * 0.05:
                     is_extreme = True
-                    extreme_type = f"💀 КРИТИЧЕСКАЯ ОШИБКА! Скидка {int((1 - price/t['real_price'])*100)}%"
-                elif price < t["real_price"] * 0.3:  # Скидка больше 70%
+                    extreme_type = f"🔴 КРИТИЧЕСКАЯ ОШИБКА! Скидка {int((1 - price/t['real_price'])*100)}%"
+                elif price < t["real_price"] * 0.3:
                     is_extreme = True
-                    extreme_type = f"⚠️ СИЛЬНАЯ СКИДКА {int((1 - price/t['real_price'])*100)}%"
+                    extreme_type = f"⚠️ БОЛЬШАЯ СКИДКА {int((1 - price/t['real_price'])*100)}%"
                 
                 if is_extreme:
                     errors.append({
@@ -165,7 +158,6 @@ class ExtremePriceScanner:
                         "expected": t["real_price"],
                         "discount": int((1 - price/t["real_price"]) * 100),
                         "extreme_type": extreme_type,
-                        "is_extreme": True,
                         "url": f"https://www.wildberries.ru/product/{t['id']}" if t["type"] == "wb" else f"https://www.ozon.ru/product/{t['id']}"
                     })
             
@@ -185,7 +177,7 @@ def autoscan_loop():
     
     while autoscan_running:
         try:
-            print(f"🔍 Автосканирование экстремальных цен в {time.strftime('%H:%M:%S')}")
+            print(f"🔍 Автосканирование в {time.strftime('%H:%M:%S')}")
             errors = scanner.find_extreme_errors()
             
             if errors:
@@ -202,14 +194,10 @@ def autoscan_loop():
                     msg += f"⚡ Скидка: {e['discount']}%\n\n"
                 
                 msg += "━━━━━━━━━━━━━━━━━━━━━\n"
-                msg += "⚖️ *ЮРИДИЧЕСКАЯ ЗАЩИТА:*\n"
-                msg += "• Ст. 435 ГК РФ — публичная оферта\n"
-                msg += "• Ст. 438 ГК РФ — акцепт (оплата)\n"
-                msg += "• Ст. 310 ГК РФ — отказ запрещён\n\n"
-                msg += "💡 Продавец НЕ МОЖЕТ отменить заказ!\n"
-                msg += f"📊 Всего найдено: {settings['total_errors_found']}"
+                msg += "⚖️ Ст. 435-438 ГК РФ — договор заключён!\n"
+                msg += "💡 Продавец НЕ МОЖЕТ отменить заказ!"
                 
-                bot.send_message(1279722309, msg, parse_mode='Markdown')
+                bot.send_message(ADMIN_ID, msg, parse_mode='Markdown')
                 found_errors = errors
             else:
                 print("❌ Экстремальных ошибок не найдено")
@@ -247,7 +235,7 @@ def send_welcome(message):
     )
     
     bot.reply_to(message, 
-        "⚖️ *LEGAL ARBITRAGE BOT — ПОИСК ЭКСТРЕМАЛЬНЫХ ЦЕН*\n\n"
+        "⚖️ *LEGAL ARBITRAGE BOT*\n\n"
         "🔍 *Что я умею:*\n"
         "✅ Искать товары по сумасшедшим ценам (1₽, 10₽, 50₽, 100₽ и т.д.)\n"
         "✅ Находить ошибки с любой ценой (хоть 1 рубль!)\n"
@@ -259,8 +247,7 @@ def send_welcome(message):
         "/stats - статистика\n\n"
         "⚖️ *ЗАКОН НА ТВОЕЙ СТОРОНЕ!*\n"
         "Ст. 435-438 ГК РФ — договор заключён с момента оплаты!\n"
-        "Продавец НЕ ИМЕЕТ ПРАВА отменить заказ!\n\n"
-        "🔽 Выбери действие:",
+        "Продавец НЕ ИМЕЕТ ПРАВА отменить заказ!",
         parse_mode='Markdown',
         reply_markup=keyboard)
 
@@ -278,7 +265,7 @@ def autoscan_menu(message):
         f"🔄 *АВТОМАТИЧЕСКИЙ ПОИСК ЭКСТРЕМАЛЬНЫХ ЦЕН*\n\n"
         f"📊 Статус: {status_text}\n"
         f"⏱️ Интервал: 10 минут\n"
-        f"🔍 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽, 1000₽ и любые аномалии\n"
+        f"🔍 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии\n"
         f"📊 Всего найдено ошибок: {settings['total_errors_found']}\n\n"
         f"При включении бот будет САМ искать ошибки\n"
         f"и присылать уведомления в этот чат!",
@@ -290,11 +277,9 @@ def scan_command(message):
     bot.reply_to(message, 
         "🔍 *Сканирую экстремальные цены...*\n"
         "⏱️ Это займёт 30-40 секунд\n\n"
-        "🛒 Проверяю:\n"
-        "• Цены 1₽, 10₽, 50₽, 100₽, 500₽\n"
-        "• Скидки >70%\n"
-        "• Любые аномалии\n\n"
-        "📦 Маркетплейсы: WB и Ozon",
+        "🛒 Проверяю: WB и Ozon\n\n"
+        "💰 Ищу цены: 1₽, 10₽, 50₽, 100₽, 500₽\n"
+        "📊 Любые аномалии со скидкой >70%",
         parse_mode='Markdown')
     
     global found_errors
@@ -307,12 +292,11 @@ def scan_command(message):
             parse_mode='Markdown')
         return
     
-    # Формируем подробный отчёт
+    # Формируем отчёт
     msg = "🚨 *НАЙДЕНЫ ЭКСТРЕМАЛЬНЫЕ ЦЕНОВЫЕ ОШИБКИ!*\n\n"
     
-    for i, e in enumerate(found_errors, 1):
-        # Эмодзи в зависимости от критичности
-        if e['price'] <= 50:
+    for e in found_errors[:10]:
+        if e['price'] <= 100:
             emoji = "💀"
         elif e['price'] <= 500:
             emoji = "🔴"
@@ -321,30 +305,24 @@ def scan_command(message):
         else:
             emoji = "🟡"
         
-        msg += f"{emoji} *{i}. {e['product']}*\n"
+        msg += f"{emoji} *{e['product']}*\n"
         msg += f"🛒 {e['market']}\n"
         msg += f"💰 *Цена: {e['price']:,} ₽*\n"
         msg += f"📊 Рыночная: ~{e['expected']:,} ₽\n"
         msg += f"⚡ Скидка: {e['discount']}%\n"
-        msg += f"⚠️ {e['extreme_type']}\n"
-        msg += f"🔗 [Ссылка на товар]({e['url']})\n\n"
+        msg += f"⚠️ {e['extreme_type']}\n\n"
     
     msg += "━━━━━━━━━━━━━━━━━━━━━\n"
     msg += "⚖️ *ЮРИДИЧЕСКАЯ ЗАЩИТА:*\n"
-    msg += "✅ Ст. 435 ГК РФ — публичная оферта\n"
-    msg += "✅ Ст. 438 ГК РФ — акцепт (оплата = договор)\n"
-    msg += "✅ Ст. 310 ГК РФ — односторонний отказ ЗАПРЕЩЁН\n\n"
-    msg += "💡 *Что делать:*\n"
-    msg += "1. Сделай скриншот цены\n"
-    msg += "2. Оплати заказ\n"
-    msg += "3. При отмене используй скрипт: /legal_script\n\n"
-    msg += "⚡ Продавец НЕ МОЖЕТ отменить заказ по закону!"
+    msg += "• Ст. 435 ГК РФ — публичная оферта\n"
+    msg += "• Ст. 438 ГК РФ — акцепт (оплата = договор)\n"
+    msg += "• Ст. 310 ГК РФ — односторонний отказ ЗАПРЕЩЁН\n\n"
+    msg += "💡 Продавец НЕ МОЖЕТ отменить заказ по закону!"
     
-    bot.reply_to(message, msg, parse_mode='Markdown', disable_web_page_preview=True)
+    bot.reply_to(message, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['analyze'])
 def analyze_command(message):
-    """Юридический анализ любой цены (хоть 1 рубль)"""
     try:
         args = message.text.split()
         if len(args) < 3:
@@ -353,10 +331,7 @@ def analyze_command(message):
                 "📌 *Примеры:*\n"
                 "`/analyze 100000 1` — анализ покупки за 1₽\n"
                 "`/analyze 50000 50` — анализ покупки за 50₽\n"
-                "`/analyze 75000 500` — анализ покупки за 500₽\n\n"
-                "💡 *Что означают цифры:*\n"
-                "100000 — сколько реально стоит товар\n"
-                "1 — цена по ошибке",
+                "`/analyze 75000 500` — анализ покупки за 500₽",
                 parse_mode='Markdown')
             return
         
@@ -364,53 +339,21 @@ def analyze_command(message):
         error = int(args[2])
         discount = (market - error) / market * 100
         
-        # Юридический анализ для любой цены (даже 1₽)
-        if error <= 10:
-            legal_risk = "💀 КРИТИЧЕСКИЙ РИСК (шанс 5-10%)"
-            law = "Ст. 435-438 ГК РФ — договор заключён, но суд может признать ошибку"
-            evidence = "Обязательно видео + скриншоты + переписка"
-            strategy = "Плати, сохраняй всё. При отмене — судись до конца!"
-        elif error <= 100:
-            legal_risk = "🔴 ВЫСОКИЙ РИСК (шанс 20-30%)"
+        # Юридический анализ для любой цены
+        if error <= 50:
+            verdict = "💀 ЭКСТРЕМАЛЬНЫЙ РИСК (шанс 5-10%)"
+            law = "Ст. 435-438 ГК РФ — договор заключён"
+        elif error <= 500:
+            verdict = "🔴 ВЫСОКИЙ РИСК (шанс 20-30%)"
             law = "Ст. 435-438 ГК РФ — оферта акцептована"
-            evidence = "Скриншоты, чек, переписка"
-            strategy = "Покупай. 30% шанс что оставят"
-        elif error <= 1000:
-            legal_risk = "🟠 СРЕДНИЙ РИСК (шанс 40-60%)"
-            law = "Ст. 435-438, 310 ГК РФ — отказ запрещён"
-            evidence = "Скриншоты + чек"
-            strategy = "Бери смелее, шансы 50/50"
         elif discount > 70:
-            legal_risk = "🟢 НИЗКИЙ РИСК (шанс 70-85%)"
-            law = "Ст. 454 ГК РФ — обычная купля-продажа"
-            evidence = "Достаточно чека"
-            strategy = "Покупай, почти 100% твой"
+            verdict = "🟠 СРЕДНИЙ РИСК (шанс 60-70%)"
+            law = "Ст. 435-438, 310 ГК РФ"
         else:
-            legal_risk = "✅ БЕЗОПАСНО (шанс 95%+)"
-            law = "Стандартная сделка"
-            evidence = "Чек"
-            strategy = "Абсолютно законно"
+            verdict = "🟢 НИЗКИЙ РИСК (шанс 90%)"
+            law = "Ст. 454 ГК РФ — обычная сделка"
         
-        # Скрипт для продавца (адаптирован под экстремальную цену)
-        if error <= 100:
-            seller_script = f"""Здравствуйте! Я оплатил {error:,} ₽ за товар.
-            
-Ст. 435 ГК РФ: ваше предложение = оферта
-Ст. 438 ГК РФ: моя оплата = акцепт
-Ст. 310 ГК РФ: отказ запрещён
-
-У меня есть скриншоты и видео оформления заказа.
-Требую исполнить договор купли-продажи.
-
-Я действовал добросовестно, не зная об ошибке.
-Это ваш предпринимательский риск.
-
-Буду защищать свои права в суде при необходимости."""
-        else:
-            seller_script = f"Здравствуйте! Заказ оплачен по цене {error:,} ₽. Согласно ст. 435-438 ГК РФ договор заключён. Прошу исполнить обязательства."
-        
-        response = f"""
-📊 *ЮРИДИЧЕСКИЙ АНАЛИЗ ЭКСТРЕМАЛЬНОЙ ЦЕНЫ*
+        response = f"""📊 *ЮРИДИЧЕСКИЙ АНАЛИЗ ЭКСТРЕМАЛЬНОЙ ЦЕНЫ*
 
 ━━━━━━━━━━━━━━━━━━━━━
 💰 *Цены:*
@@ -420,101 +363,39 @@ def analyze_command(message):
 
 ━━━━━━━━━━━━━━━━━━━━━
 ⚖️ *Юридическая оценка:*
-{legal_risk}
+{verdict}
 
 📜 *Правовая база:*
 {law}
 
-📋 *Нужные доказательства:*
-{evidence}
-
-🎯 *Стратегия:*
-{strategy}
-
 ━━━━━━━━━━━━━━━━━━━━━
-📝 *Скрипт для продавца:*
-`{seller_script}`
-
-━━━━━━━━━━━━━━━━━━━━━
-💡 *ВАЖНО:* При цене {error:,} ₽ за товар за {market:,} ₽:
+💡 *ВАЖНО:* 
 • Договор считается заключённым (ст. 435-438 ГК РФ)
 • Односторонний отказ ЗАПРЕЩЁН (ст. 310 ГК РФ)
 • Скриншоты и чек — главное доказательство
 
-🔥 *Действуй! Продавец не имеет права отменить заказ!*
-"""
+🔥 *Продавец не имеет права отменить заказ!*"""
+        
         bot.reply_to(message, response, parse_mode='Markdown')
         
     except Exception as e:
-        bot.reply_to(message, f"❌ Ошибка: {e}\nИспользуй `/analyze 100000 5000`", parse_mode='Markdown')
+        bot.reply_to(message, f"❌ Ошибка: {e}")
 
 @bot.message_handler(commands=['stats'])
 def stats_command(message):
-    markets_count = {}
-    for e in found_errors:
-        markets_count[e['market']] = markets_count.get(e['market'], 0) + 1
-    
-    stats = ""
-    for market, count in markets_count.items():
-        stats += f"🛒 {market}: {count} ошибок\n"
-    
-    if not stats:
-        stats = "Нет данных. Используй /scan"
-    
     status_text = "🟢 ВКЛЮЧЕН" if settings["autoscan_enabled"] else "🔴 ВЫКЛЮЧЕН"
-    
-    # Считаем экстремальные цены
-    extreme_count = sum(1 for e in found_errors if e.get('price', 0) <= 500)
     
     bot.reply_to(message,
         f"📊 *СТАТИСТИКА ЭКСТРЕМАЛЬНЫХ ЦЕН*\n\n"
-        f"🔍 *Последнее сканирование:*\n{stats}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💀 *Экстремальных цен (<500₽):* {extreme_count}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔄 *Автопоиск:* {status_text}\n"
         f"⏱️ Интервал: 10 минут\n"
         f"📊 Всего ошибок: {settings['total_errors_found']}\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🛒 Маркетплейсы: WB и Ozon\n"
+        f"💰 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽\n"
         f"⚖️ Закон: Ст. 435-438 ГК РФ\n\n"
         f"🚀 Используй /scan для поиска ошибок от 1₽!",
         parse_mode='Markdown')
-
-@bot.message_handler(commands=['legal_script'])
-def legal_script(message):
-    """Готовый скрипт для продавца"""
-    script = """
-⚖️ *ГОТОВЫЙ СКРИПТ ДЛЯ ПРОДАВЦА*
-
-Скопируй и отправь продавцу при отмене заказа:
-
----
-
-«Здравствуйте!
-
-Мной был совершён заказ и произведена полная оплата.
-
-В соответствии со статьей 435 Гражданского кодекса РФ, размещение товара с указанием цены является публичной офертой.
-
-Моя оплата в соответствии со статьей 438 ГК РФ является акцептом, что означает заключение договора купли-продажи.
-
-Статья 310 ГК РФ запрещает односторонний отказ от исполнения обязательства.
-
-У меня есть скриншоты страницы товара с ценой, подтверждение оплаты и чек.
-
-Требую исполнить договор и отправить товар.
-
-В случае отказа буду вынужден обратиться в суд, а также жаловаться в Роспотребнадзор и ФАС.»
-
----
-
-💡 *Что делать после отправки:*
-1. Сохрани скриншот переписки
-2. Если отменят — пиши в поддержку маркетплейса
-3. Если не помогут — я подготовлю иск в суд
-"""
-    bot.reply_to(message, script, parse_mode='Markdown')
 
 # ==================== ОБРАБОТКА КНОПОК ====================
 @bot.callback_query_handler(func=lambda call: True)
@@ -566,7 +447,6 @@ print("⚖️ Legal Arbitrage Bot — ПОИСК ЭКСТРЕМАЛЬНЫХ ЦЕ
 print("🛒 Сканирую: WB, Ozon")
 print("💰 Ищу: 1₽, 10₽, 50₽, 100₽, 500₽ и любые аномалии")
 print(f"🔄 Автопоиск: {'ВКЛЮЧЕН' if settings['autoscan_enabled'] else 'ВЫКЛЮЧЕН'}")
-print(f"🌐 Веб-интерфейс: https://bot-market-01iu.onrender.com")
 print("=" * 50)
 
 while True:
