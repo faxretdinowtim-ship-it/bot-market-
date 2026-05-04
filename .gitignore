@@ -1,29 +1,3 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-.Python
-env/
-venv/
 .env
-
-# Базы данных
-*.db
-*.sqlite
-
-# Логи
-*.log
-
-# Токены и секреты
-config_local.py
-*.key
-*.pem
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
+__pycache__/
+*.pyc
