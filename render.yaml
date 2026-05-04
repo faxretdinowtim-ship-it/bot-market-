@@ -1,12 +1,9 @@
-# render.yaml
 services:
   - type: worker
-    name: legal-arbitrage-bot
+    name: legal-bot-worker
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
       - key: BOT_TOKEN
-        sync: false
-      - key: ADMIN_ID
-        sync: false
+        value: 8285727455:AAHZ3X8s7enoZC5csZxryGnZGuxSe-3Naig
